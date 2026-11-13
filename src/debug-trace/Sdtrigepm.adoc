@@ -1,0 +1,106 @@
+[[ext:sdtrigepm]]
+=== ext:sdtrigepm[] Trigger Effective Privilege Mode
+
+==== Introduction
+
+Load and store accesses performed while `mstatus`.MPRV=1, or by hypervisor
+instructions HLV.*, HSV.*, and HLVX.*, execute with an effective privilege
+mode that may differ from the current privilege mode.  These instructions
+are used by privileged software, such as a hypervisor, to, among other things,
+emulate memory accesses on behalf of less privileged software, such as a
+guest operating system.  As defined by ext:sdtrig[], these emulated accesses
+would not match `mcontrol6` triggers configured to match accesses in the less
+privileged mode.  This results in behavior that is unexpected by a debugger,
+where the workload under debug appears to perform accesses that should have
+resulted in trigger actions.  This also presents a virtualization hole,
+wherein a guest can observe different behavior when an operation is emulated.
+With Sdtrigepm, these emulated accesses match triggers, and fire trigger
+actions, just as though the access was performed in the less privileged mode.
+Sdtrigepm depends on ext:sdtrig[].
+
+==== Behavior
+
+When Sdtrigepm is implemented, the following behaviors apply to `mcontrol6`
+trigger match.
+
+- Loads performed while `mstatus`.MPRV=1 and `mstatus`.MXR=1, and loads
+  performed by HLVX.* instructions, do not match.
+- Privilege mode enabling for the trigger is based on the effective privilege
+  mode of the access, rather than the current privilege mode.
+- ASID match comparison, configured in sselect/svalue in textra*, depends
+  upon the effective privilege mode of the access, rather than the current
+  privileged mode.
+- Breakpoint reentrancy protection mechanism #1 (see chapter 5.4 of the
+  RISC-V Debug v1.0 specification) depends on interrupt enabling in, and
+  delegation of breakpoint exceptions to, the effective privilege mode of
+  the access, rather than the current privilege mode.
+
+
+[NOTE]
+====
+To illustrate the benefit of this new behavior, consider a hypervisor that
+emulates, on behalf of a guest, a load instruction not supported natively by
+the hart.  When the guest, running in VS-mode, attempts to execute the
+unsupported instruction an illegal instruction exception will be raised,
+which will trap to HS-mode.  There the hypervisor will perform an HLVX to
+read the instruction bytes (at the address in sepc), decode the instruction,
+and jump to the appropriate emulation routine.  The emulation routine will
+perform an HLV, with `hstatus`.SPVP=1, to read guest supervisor memory.  If
+the guest has configured an `mcontrol6` trigger to match the same guest virtual
+address or data value accessed by this HLV, and enabled that trigger to match
+in VS-mode, the trigger can now match and fire on the HLV access.  If the
+action is a breakpoint exception it will trap to HS-mode, and the hypervisor
+will deliver the exception to the guest.
+====
+
+[NOTE]
+====
+As described in the example above, HLVX.* instructions are used by a hypervisor
+to read guest instruction bytes.  Loads with MPRV=MXR=1 are used in the same
+fashion.  Arguably, the loads performed by these instructions should match
+`mcontrol6` execution (a.k.a. instruction) address or execution value triggers
+enabled in the effective privilege mode (VS- or VU-mode).  However, this
+behavior would add hardware complexity, since such matching is typically
+performed on instruction fetch requests in the frontend, not on load requests
+in the backend.  And further, such matching is unlikely to add value.
+
+Consider a guest that has configured an `mcontrol6` trigger to match on the
+instruction address or instruction value associated with an instruction that
+will be emulated by the hypervisor.  Per chapter 5.3 of the Debug v1.0 spec,
+the trigger action (breakpoint exception or debug mode entry) will be taken
+before any illegal instruction exception or virtual instruction exception can
+trap to the hypervisor.  Thus if guest execution of the instruction resulted
+in a trap to the hypervisor, there must be no matching guest `mcontrol6`
+instruction trigger.  For this reason there is little reason to take on the
+added hardware complexity to match on HLVX loads or loads with MPRV=MXR=1.
+====
+
+[NOTE]
+====
+Sdtrig reentrancy protections serve to ensure that triggers do not cause an
+unexpected breakpoint exception from within an exception or interrupt handler,
+since that would overwrite critical state related to the original
+interrupt/exception (e.g., xcause).  This extension alters that behavior,
+inhibiting trigger match/action on an emulated access only if executing the
+access from within the effective privilege mode would have done the same.
+This means that reentrancy is allowed for these accesses, but that’s nothing
+new.  Such accesses can already incur access-fault exceptions, as though they
+executed in the effective privilege mode, and software must account for the
+possibility of nested exceptions before invoking these accesses.  This change
+merely adds breakpoint exceptions to the list of possible nested exceptions
+to handle.
+====
+
+
+[NOTE]
+====
+Within the Debug TG there was discussion of whether this extension needed some
+means of discovery by a debugger, such as a new value in tinfo.VERSION, or a
+new bit to tinfo to indicate its presence.  This extension is not expected to
+result in any change in debug tool behavior, but a debugger user may use
+triggers differently based on whether it is implemented.  Because there are
+many ISA extensions of which a debugger user may wish to be aware, but which
+do not have programmatic discoverability, no CSR indication has been added
+for this one.
+====
+
